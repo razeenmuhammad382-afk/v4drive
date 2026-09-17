@@ -1,0 +1,114 @@
+name: Build Controller Bridge V5 - Auto Discovery
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Android project
+        shell: bash
+        run: |
+          mkdir -p app/src/main/java/com/example/controllerbridge app/src/main/res/values
+          cat > settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name='ControllerBridgeV5'; include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins { id 'com.android.application' version '8.7.3' apply false }
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+          android { namespace 'com.example.controllerbridge'; compileSdk 35
+            defaultConfig { applicationId 'com.example.controllerbridge'; minSdk 26; targetSdk 35; versionCode 5; versionName '5.0' }
+            compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          EOF
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:colorAccent">#3F51B5</item></style></resources>
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+            <application android:theme="@style/AppTheme" android:label="Controller Bridge V5" android:allowBackup="false">
+              <activity android:name=".MainActivity" android:screenOrientation="portrait" android:exported="true">
+                <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/example/controllerbridge/MainActivity.java <<'EOF'
+          package com.example.controllerbridge;
+          import android.app.*; import android.os.*; import android.view.*; import android.widget.*;
+          import java.io.*; import java.net.*; import java.nio.charset.StandardCharsets; import java.util.Locale;
+          public class MainActivity extends Activity {
+            static final int TCP=5555, UDP=5556; TextView status,state,packets; Socket socket; PrintWriter out; volatile boolean connected; long count;
+            volatile float lx,ly,rx,ry,lt,rt; volatile int buttons;
+            public void onCreate(Bundle b){super.onCreate(b); LinearLayout l=new LinearLayout(this);l.setOrientation(LinearLayout.VERTICAL);l.setPadding(28,28,28,28);
+              TextView title=t("🎮 Controller Bridge V5",24); status=t("🔎 PC: not discovered",18); packets=t("Packets sent: 0",16); state=t("LX 0.00 LY 0.00\nRX 0.00 RY 0.00\nLT 0.00 RT 0.00\nButtons 0x0000",17);
+              Button find=new Button(this);find.setText("FIND WINDOWS PC");find.setOnClickListener(v->discover()); l.addView(title);l.addView(status);l.addView(packets);l.addView(state);l.addView(find);setContentView(l);controller(); }
+            TextView t(String s,int z){TextView v=new TextView(this);v.setText(s);v.setTextSize(z);v.setPadding(0,10,0,10);return v;}
+            void discover(){status.setText("🔎 Searching...");new Thread(()->{try(DatagramSocket d=new DatagramSocket()){d.setBroadcast(true);d.setSoTimeout(1200);byte[] q="CB5_DISCOVER".getBytes(StandardCharsets.UTF_8);d.send(new DatagramPacket(q,q.length,InetAddress.getByName("255.255.255.255"),UDP));byte[] b=new byte[64];DatagramPacket r=new DatagramPacket(b,b.length);d.receive(r);String s=new String(r.getData(),r.getOffset(),r.getLength(),StandardCharsets.UTF_8).trim();if(!s.equals("CB5|5555"))throw new IOException("bad reply");String ip=r.getAddress().getHostAddress();runOnUiThread(()->status.setText("🟢 PC found: "+ip));connect(ip);}catch(Exception e){runOnUiThread(()->status.setText("🔴 PC not found: "+e.getClass().getSimpleName()));}}).start();}
+            void connect(String ip){new Thread(()->{try{close();socket=new Socket();socket.setTcpNoDelay(true);socket.connect(new InetSocketAddress(ip,TCP),5000);out=new PrintWriter(new OutputStreamWriter(socket.getOutputStream(),StandardCharsets.UTF_8),true);connected=true;count=0;runOnUiThread(()->status.setText("🟢 PC connected: "+ip));while(connected&&!socket.isClosed()){send();Thread.sleep(50);}}catch(Exception e){connected=false;runOnUiThread(()->status.setText("🔴 Connection lost: "+e.getClass().getSimpleName()));}}).start();}
+            synchronized void send(){if(!connected||out==null)return;out.println(String.format(Locale.US,"V5|%.5f|%.5f|%.5f|%.5f|%.5f|%.5f|%d",lx,ly,rx,ry,lt,rt,buttons));if(out.checkError()){connected=false;return;}count++;if(count%5==0){long n=count;runOnUiThread(()->{packets.setText("Packets sent: "+n);state.setText(String.format(Locale.US,"LX %+.2f LY %+.2f\nRX %+.2f RY %+.2f\nLT %.2f RT %.2f\nButtons 0x%04X",lx,ly,rx,ry,lt,rt,buttons));});}}
+            public boolean dispatchKeyEvent(KeyEvent e){InputDevice d=InputDevice.getDevice(e.getDeviceId());if(d!=null){int s=d.getSources();if((s&InputDevice.SOURCE_GAMEPAD)!=0||(s&InputDevice.SOURCE_JOYSTICK)!=0){if(e.getAction()==KeyEvent.ACTION_DOWN&&e.getRepeatCount()==0){button(e.getKeyCode(),true);return true;}if(e.getAction()==KeyEvent.ACTION_UP){button(e.getKeyCode(),false);return true;}}}return super.dispatchKeyEvent(e);}
+            void button(int c,boolean down){int m=mask(c);if(m==0)return;if(down)buttons|=m;else buttons&=~m;}
+            int mask(int c){switch(c){case KeyEvent.KEYCODE_DPAD_UP:return 1;case KeyEvent.KEYCODE_DPAD_DOWN:return 2;case KeyEvent.KEYCODE_DPAD_LEFT:return 4;case KeyEvent.KEYCODE_DPAD_RIGHT:return 8;case KeyEvent.KEYCODE_BUTTON_START:return 0x10;case KeyEvent.KEYCODE_BUTTON_SELECT:return 0x20;case KeyEvent.KEYCODE_BUTTON_THUMBL:return 0x40;case KeyEvent.KEYCODE_BUTTON_THUMBR:return 0x80;case KeyEvent.KEYCODE_BUTTON_L1:return 0x100;case KeyEvent.KEYCODE_BUTTON_R1:return 0x200;case KeyEvent.KEYCODE_BUTTON_A:return 0x1000;case KeyEvent.KEYCODE_BUTTON_B:return 0x2000;case KeyEvent.KEYCODE_BUTTON_X:return 0x4000;case KeyEvent.KEYCODE_BUTTON_Y:return 0x8000;default:return 0;}}
+            public boolean dispatchGenericMotionEvent(MotionEvent e){if((e.getSource()&InputDevice.SOURCE_CLASS_JOYSTICK)!=0&&e.getAction()==MotionEvent.ACTION_MOVE){lx=c(e.getAxisValue(MotionEvent.AXIS_X));ly=c(e.getAxisValue(MotionEvent.AXIS_Y));rx=c(e.getAxisValue(MotionEvent.AXIS_Z));ry=c(e.getAxisValue(MotionEvent.AXIS_RZ));lt=c01(e.getAxisValue(MotionEvent.AXIS_LTRIGGER));rt=c01(e.getAxisValue(MotionEvent.AXIS_RTRIGGER));return true;}return super.dispatchGenericMotionEvent(e);}
+            float c(float v){return Math.max(-1,Math.min(1,v));}float c01(float v){return Math.max(0,Math.min(1,v));}
+            void controller(){for(int id:InputDevice.getDeviceIds()){InputDevice d=InputDevice.getDevice(id);if(d!=null){int s=d.getSources();if((s&InputDevice.SOURCE_GAMEPAD)!=0||(s&InputDevice.SOURCE_JOYSTICK)!=0){status.setText("🟢 Controller found: "+d.getName());return;}}}}
+            void close(){connected=false;try{if(out!=null)out.close();}catch(Exception ignored){}try{if(socket!=null)socket.close();}catch(Exception ignored){}out=null;socket=null;}
+            protected void onDestroy(){close();super.onDestroy();}
+          }
+          EOF
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: gradle/actions/setup-gradle@v4
+        with: {gradle-version: '8.9'}
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with: {name: ControllerBridge-V5-APK, path: app/build/outputs/apk/debug/app-debug.apk}
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Create Windows project
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force win | Out-Null
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0-windows</TargetFramework><RuntimeIdentifier>win-x64</RuntimeIdentifier><SelfContained>true</SelfContained><PublishSingleFile>true</PublishSingleFile><IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+            <ItemGroup><PackageReference Include="Nefarius.ViGEm.Client" Version="1.21.256" /></ItemGroup>
+          </Project>
+          '@ | Set-Content win/ControllerBridgeV5.csproj -Encoding UTF8
+          @'
+          using System; using System.Globalization; using System.IO; using System.Net; using System.Net.Sockets; using System.Text; using Nefarius.ViGEm.Client; using Nefarius.ViGEm.Client.Targets;
+          class Program{
+            const int TCP=5555,UDP=5556;
+            static void Main(){Console.Title="Controller Bridge V5";Console.WriteLine("==========================================");Console.WriteLine(" Controller Bridge V5 - AUTO DISCOVERY");Console.WriteLine("==========================================\n");try{using var vc=new ViGEmClient();IXbox360Controller pad=vc.CreateXbox360Controller();pad.Connect();Console.WriteLine("Virtual Xbox 360 controller: READY");Console.WriteLine("UDP discovery: 5556");Console.WriteLine("TCP controller: 5555\n");var t=new Thread(Discovery){IsBackground=true};t.Start();var server=new TcpListener(IPAddress.Any,TCP);server.Start();Console.WriteLine("Waiting for Android...");while(true){using var c=server.AcceptTcpClient();Console.WriteLine("PHONE CONNECTED: "+c.Client.RemoteEndPoint);try{using var r=new StreamReader(c.GetStream());string? line;while((line=r.ReadLine())!=null)if(Apply(line,pad))Console.WriteLine(line);}catch(Exception e){Console.WriteLine("Connection error: "+e.Message);}Console.WriteLine("PHONE DISCONNECTED\n");}}catch(Exception e){Console.WriteLine("V5 ERROR:\n"+e);Console.ReadLine();}}
+            static void Discovery(){try{using var u=new UdpClient(UDP);var ep=new IPEndPoint(IPAddress.Any,0);while(true){byte[] b=u.Receive(ref ep);string s=Encoding.UTF8.GetString(b).Trim();if(s=="CB5_DISCOVER"){byte[] q=Encoding.UTF8.GetBytes("CB5|5555");u.Send(q,q.Length,ep);Console.WriteLine("DISCOVERY -> "+ep.Address);}}}catch(Exception e){Console.WriteLine("Discovery error: "+e.Message);}}
+            static bool Apply(string line,IXbox360Controller p){try{var a=line.Split('|');if(a.Length!=8||a[0]!="V5")return false;p.LeftThumbX=Short(a[1]);p.LeftThumbY=Short(a[2]);p.RightThumbX=Short(a[3]);p.RightThumbY=Short(a[4]);p.LeftTrigger=Byte(a[5]);p.RightTrigger=Byte(a[6]);p.SetButtonsFull(Convert.ToUInt16(a[7]));p.SubmitReport();return true;}catch{return false;}}
+            static float F(string s)=>float.Parse(s,NumberStyles.Float,CultureInfo.InvariantCulture);static short Short(string s){float v=Math.Clamp(F(s),-1,1);return v<=-1?short.MinValue:v>=1?short.MaxValue:(short)(v*32767);}static byte Byte(string s)=>(byte)(Math.Clamp(F(s),0,1)*255);
+          }
+          '@ | Set-Content win/Program.cs -Encoding UTF8
+          @'
+          @echo off
+          powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command \"New-NetFirewallRule -DisplayName ''Controller Bridge V5 TCP'' -Direction Inbound -Protocol TCP -LocalPort 5555 -RemoteAddress LocalSubnet -Action Allow -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName ''Controller Bridge V5 UDP Discovery'' -Direction Inbound -Protocol UDP -LocalPort 5556 -RemoteAddress LocalSubnet -Action Allow -ErrorAction SilentlyContinue\"'"
+          echo Firewall setup requested. Close this window after the administrator prompt completes.
+          pause
+          '@ | Set-Content Setup-Firewall.cmd -Encoding ASCII
+      - name: Build Windows
+        shell: pwsh
+        run: |
+          dotnet restore win/ControllerBridgeV5.csproj
+          dotnet publish win/ControllerBridgeV5.csproj -c Release -r win-x64 --self-contained true -o publish
+          Copy-Item Setup-Firewall.cmd publish/Setup-Firewall.cmd
+          Set-Content publish/README.txt "Run Setup-Firewall.cmd once as Administrator, then run ControllerBridgeV5.exe. Android V5 discovers the PC automatically; no IP entry is required."
+      - uses: actions/upload-artifact@v4
+        with: {name: ControllerBridge-V5-Windows, path: publish}
