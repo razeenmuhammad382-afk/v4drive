@@ -1,0 +1,211 @@
+name: Build Controller Bridge V6 - Windows Manual IP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Create Windows project
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force win | Out-Null
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net8.0-windows</TargetFramework>
+              <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+              <SelfContained>true</SelfContained>
+              <PublishSingleFile>true</PublishSingleFile>
+              <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="Nefarius.ViGEm.Client" Version="1.21.256" />
+            </ItemGroup>
+          </Project>
+          '@ | Set-Content win/ControllerBridgeV6.csproj -Encoding UTF8
+          @'
+          using System;
+          using System.Globalization;
+          using System.IO;
+          using System.Linq;
+          using System.Net;
+          using System.Net.NetworkInformation;
+          using System.Net.Sockets;
+          using System.Text;
+          using Nefarius.ViGEm.Client;
+          using Nefarius.ViGEm.Client.Targets;
+
+          internal static class Program
+          {
+              private const int TcpPort = 5555;
+
+              private static void Main()
+              {
+                  Console.Title = "Controller Bridge V6";
+                  PrintHeader();
+
+                  try
+                  {
+                      using var client = new ViGEmClient();
+                      IXbox360Controller pad = client.CreateXbox360Controller();
+                      pad.Connect();
+
+                      Console.WriteLine("Virtual Xbox 360 controller: READY");
+                      Console.WriteLine();
+                      PrintIpv4Addresses();
+                      Console.WriteLine($"TCP port: {TcpPort}");
+                      Console.WriteLine();
+                      Console.WriteLine("Enter the PC IPv4 address shown above in the Android app.");
+                      Console.WriteLine("Run Setup-Firewall.cmd once as Administrator if Windows blocks the connection.");
+                      Console.WriteLine();
+
+                      var server = new TcpListener(IPAddress.Any, TcpPort);
+                      server.Start();
+                      Console.WriteLine($"Listening on TCP {TcpPort}...");
+                      Console.WriteLine("Waiting for Android...");
+                      Console.WriteLine();
+
+                      while (true)
+                      {
+                          using TcpClient connection = server.AcceptTcpClient();
+                          connection.NoDelay = true;
+                          Console.WriteLine($"PHONE CONNECTED: {connection.Client.RemoteEndPoint}");
+
+                          try
+                          {
+                              using NetworkStream stream = connection.GetStream();
+                              using var reader = new StreamReader(stream, Encoding.UTF8, false, 4096, leaveOpen: true);
+
+                              string? line;
+                              while ((line = reader.ReadLine()) is not null)
+                              {
+                                  if (ApplyPacket(line, pad))
+                                      Console.WriteLine(line);
+                              }
+                          }
+                          catch (Exception ex)
+                          {
+                              Console.WriteLine($"Connection error: {ex.Message}");
+                          }
+
+                          Console.WriteLine("PHONE DISCONNECTED");
+                          Console.WriteLine("Waiting for Android...");
+                          Console.WriteLine();
+                      }
+                  }
+                  catch (Exception ex)
+                  {
+                      Console.WriteLine("V6 ERROR:");
+                      Console.WriteLine(ex);
+                      Console.WriteLine();
+                      Console.WriteLine("Press Enter to close.");
+                      Console.ReadLine();
+                  }
+              }
+
+              private static void PrintHeader()
+              {
+                  Console.WriteLine("===============================================");
+                  Console.WriteLine("          Controller Bridge V6");
+                  Console.WriteLine("             MANUAL IP MODE");
+                  Console.WriteLine("===============================================");
+                  Console.WriteLine();
+              }
+
+              private static void PrintIpv4Addresses()
+              {
+                  Console.WriteLine("PC IPv4 addresses:");
+
+                  var addresses = NetworkInterface.GetAllNetworkInterfaces()
+                      .Where(n => n.OperationalStatus == OperationalStatus.Up)
+                      .SelectMany(n => n.GetIPProperties().UnicastAddresses
+                          .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                          .Select(a => new { Interface = n.Name, Address = a.Address }))
+                      .Where(x => !IPAddress.IsLoopback(x.Address))
+                      .ToList();
+
+                  if (addresses.Count == 0)
+                  {
+                      Console.WriteLine("  (No non-loopback IPv4 address found)");
+                      return;
+                  }
+
+                  foreach (var item in addresses)
+                      Console.WriteLine($"  {item.Address,-16}  [{item.Interface}]");
+              }
+
+              private static bool ApplyPacket(string line, IXbox360Controller pad)
+              {
+                  try
+                  {
+                      string[] parts = line.Split('|');
+                      if (parts.Length != 8 || parts[0] != "V5")
+                          return false;
+
+                      pad.LeftThumbX = ToShort(parts[1]);
+                      pad.LeftThumbY = ToShort(parts[2]);
+                      pad.RightThumbX = ToShort(parts[3]);
+                      pad.RightThumbY = ToShort(parts[4]);
+                      pad.LeftTrigger = ToByte(parts[5]);
+                      pad.RightTrigger = ToByte(parts[6]);
+                      pad.SetButtonsFull(Convert.ToUInt16(parts[7], CultureInfo.InvariantCulture));
+                      pad.SubmitReport();
+                      return true;
+                  }
+                  catch
+                  {
+                      return false;
+                  }
+              }
+
+              private static float ParseFloat(string value) =>
+                  float.Parse(value, NumberStyles.Float, CultureInfo.InvariantCulture);
+
+              private static short ToShort(string value)
+              {
+                  float v = Math.Clamp(ParseFloat(value), -1f, 1f);
+                  if (v <= -1f) return short.MinValue;
+                  if (v >= 1f) return short.MaxValue;
+                  return (short)(v * 32767f);
+              }
+
+              private static byte ToByte(string value) =>
+                  (byte)(Math.Clamp(ParseFloat(value), 0f, 1f) * 255f);
+          }
+          '@ | Set-Content win/Program.cs -Encoding UTF8
+          @'
+          @echo off
+          powershell -NoProfile -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command \"Get-NetFirewallRule -DisplayName ''Controller Bridge V6 TCP'' -ErrorAction SilentlyContinue | Remove-NetFirewallRule; New-NetFirewallRule -DisplayName ''Controller Bridge V6 TCP'' -Direction Inbound -Protocol TCP -LocalPort 5555 -RemoteAddress LocalSubnet -Action Allow -Profile Any\"'"
+          echo Firewall setup requested. Approve the Administrator prompt.
+          pause
+          '@ | Set-Content Setup-Firewall.cmd -Encoding ASCII
+          @'
+          Controller Bridge V6 - Windows receiver
+
+          1. Run Setup-Firewall.cmd once as Administrator.
+          2. Run ControllerBridgeV6.exe.
+          3. Find the USB-tethering IPv4 address under "PC IPv4 addresses".
+          4. Enter that address in the Android Controller Bridge app.
+          5. Use port 5555.
+
+          V6 uses manual IP entry. There is no automatic discovery.
+          The controller packet format remains compatible with the V5 Android app.
+          '@ | Set-Content README.txt -Encoding UTF8
+      - name: Build Windows
+        shell: pwsh
+        run: |
+          dotnet restore win/ControllerBridgeV6.csproj
+          dotnet publish win/ControllerBridgeV6.csproj -c Release -r win-x64 --self-contained true -o publish
+          Copy-Item Setup-Firewall.cmd publish/Setup-Firewall.cmd
+          Copy-Item README.txt publish/README.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ControllerBridge-V6-Windows
+          path: publish
